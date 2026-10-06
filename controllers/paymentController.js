@@ -58,7 +58,8 @@ const initializePayment = async (req, res) => {
           email: customer.email,
           amount: Math.round(totalAmount * 100),
           currency: "NGN",
-          callback_url: "http://localhost:5173/payment-success",
+          callback_url:
+            "https://natty-express-frontend-951u.vercel.app/payment-confirmation",
         }),
       },
     );

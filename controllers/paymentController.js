@@ -59,7 +59,7 @@ const initializePayment = async (req, res) => {
           amount: Math.round(totalAmount * 100),
           currency: "NGN",
           callback_url:
-            "https://natty-express-frontend-951u.vercel.app/payment-confirmation",
+            "https://natty-express-frontend-951u.vercel.app/payment-success",
         }),
       },
     );

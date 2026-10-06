@@ -1,4 +1,11 @@
 const Product = require("../models/Product");
+const cloudinary = require("cloudinary").v2;
+
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET,
+});
 
 const getProducts = async (req, res) => {
   try {
@@ -61,14 +68,29 @@ const createProduct = async (req, res) => {
       });
     }
 
-    const image = `/uploads/${req.file.filename}`;
+    const uploadResult = await new Promise((resolve, reject) => {
+      const stream = cloudinary.uploader.upload_stream(
+        {
+          folder: "nattyexpress/products",
+        },
+        (error, result) => {
+          if (error) {
+            reject(error);
+          } else {
+            resolve(result);
+          }
+        },
+      );
+
+      stream.end(req.file.buffer);
+    });
 
     const product = await Product.create({
       name,
       description,
       category,
       price: Number(price),
-      image,
+      image: uploadResult.secure_url,
       stock: Number(stock) || 0,
       featured: featured === "true",
     });
@@ -103,7 +125,24 @@ const updateProduct = async (req, res) => {
     };
 
     if (req.file) {
-      updatedData.image = `/uploads/${req.file.filename}`;
+      const uploadResult = await new Promise((resolve, reject) => {
+        const stream = cloudinary.uploader.upload_stream(
+          {
+            folder: "nattyexpress/products",
+          },
+          (error, result) => {
+            if (error) {
+              reject(error);
+            } else {
+              resolve(result);
+            }
+          },
+        );
+
+        stream.end(req.file.buffer);
+      });
+
+      updatedData.image = uploadResult.secure_url;
     }
 
     const updatedProduct = await Product.findByIdAndUpdate(

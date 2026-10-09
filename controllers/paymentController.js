@@ -6,26 +6,47 @@ const initializePayment = async (req, res) => {
   try {
     const { customer, paymentMethod, items } = req.body;
 
-    if (!customer || !customer.email) {
+    // Validate customer information
+    const requiredFields = [
+      "fullName",
+      "phone",
+      "email",
+      "address",
+      "city",
+      "state",
+    ];
+
+    if (
+      !customer ||
+      requiredFields.some(
+        (field) =>
+          typeof customer[field] !== "string" || !customer[field].trim(),
+      )
+    ) {
       return res.status(400).json({
-        message: "Customer information is required.",
+        message: "Please provide complete customer information.",
       });
     }
 
-    if (!items || items.length === 0) {
+    if (!Array.isArray(items) || items.length === 0) {
       return res.status(400).json({
         message: "Your cart is empty.",
       });
     }
 
+    const selectedMethod = ["card", "paypal", "bank"].includes(paymentMethod)
+      ? paymentMethod
+      : "card";
+
     let totalAmount = 0;
+    const verifiedItems = [];
+    const quantities = new Map();
 
+    // Validate products and calculate prices from the database
     for (const item of items) {
-      const product = await Product.findById(item.productId);
-
-      if (!product) {
-        return res.status(404).json({
-          message: `Product not found: ${item.productId}`,
+      if (!mongoose.Types.ObjectId.isValid(item.productId)) {
+        return res.status(400).json({
+          message: "Invalid product ID.",
         });
       }
 
@@ -37,15 +58,50 @@ const initializePayment = async (req, res) => {
         });
       }
 
+      const productId = item.productId.toString();
+      const combinedQuantity = (quantities.get(productId) || 0) + quantity;
+
+      quantities.set(productId, combinedQuantity);
+    }
+
+    for (const [productId, quantity] of quantities) {
+      const product = await Product.findById(productId);
+
+      if (!product) {
+        return res.status(404).json({
+          message: "One or more products could not be found.",
+        });
+      }
+
       if (product.stock < quantity) {
         return res.status(400).json({
           message: `${product.name} does not have enough stock.`,
         });
       }
 
-      totalAmount += Number(product.price) * quantity;
+      const price = Number(product.price);
+
+      if (!Number.isFinite(price) || price < 0) {
+        return res.status(400).json({
+          message: `Invalid price for ${product.name}.`,
+        });
+      }
+
+      verifiedItems.push({
+        productId: product._id.toString(),
+        quantity,
+      });
+
+      totalAmount += price * quantity;
     }
 
+    if (!Number.isFinite(totalAmount) || totalAmount <= 0) {
+      return res.status(400).json({
+        message: "Invalid order total.",
+      });
+    }
+
+    // Initialize the transaction with Paystack
     const response = await fetch(
       "https://api.paystack.co/transaction/initialize",
       {
@@ -55,11 +111,27 @@ const initializePayment = async (req, res) => {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          email: customer.email,
+          email: customer.email.trim().toLowerCase(),
           amount: Math.round(totalAmount * 100),
           currency: "NGN",
           callback_url:
             "https://natty-express-frontend-951u.vercel.app/payment-success",
+
+          // Associate this transaction with the authenticated user
+          // and the intended order details.
+          metadata: {
+            userId: req.user._id.toString(),
+            customer: {
+              fullName: customer.fullName.trim(),
+              phone: customer.phone.trim(),
+              email: customer.email.trim().toLowerCase(),
+              address: customer.address.trim(),
+              city: customer.city.trim(),
+              state: customer.state.trim(),
+            },
+            paymentMethod: selectedMethod,
+            items: verifiedItems,
+          },
         }),
       },
     );
@@ -74,7 +146,7 @@ const initializePayment = async (req, res) => {
       });
     }
 
-    res.json({
+    return res.json({
       message: "Payment initialized successfully.",
       authorization_url: data.data.authorization_url,
       access_code: data.data.access_code,
@@ -84,7 +156,7 @@ const initializePayment = async (req, res) => {
   } catch (error) {
     console.error("Initialize payment error:", error);
 
-    res.status(500).json({
+    return res.status(500).json({
       message: "Failed to initialize payment.",
     });
   }
@@ -95,7 +167,6 @@ const verifyPayment = async (req, res) => {
 
   try {
     const { reference } = req.params;
-    const { customer, paymentMethod, items } = req.body;
 
     if (!reference) {
       return res.status(400).json({
@@ -103,35 +174,30 @@ const verifyPayment = async (req, res) => {
       });
     }
 
-    if (!customer || !customer.email) {
-      return res.status(400).json({
-        message: "Customer information is required.",
-      });
-    }
-
-    if (!items || items.length === 0) {
-      return res.status(400).json({
-        message: "Your cart is empty.",
-      });
-    }
-
-    // Check if this payment has already created an order
+    // Check for an existing order before attempting to reduce stock.
     const existingOrder = await Order.findOne({
       paymentReference: reference,
     });
 
     if (existingOrder) {
+      if (
+        !existingOrder.user ||
+        existingOrder.user.toString() !== req.user._id.toString()
+      ) {
+        return res.status(403).json({
+          message: "You are not authorized to access this order.",
+        });
+      }
+
       return res.json({
         message: "Payment already verified.",
         order: existingOrder,
       });
     }
 
-    // Verify transaction with Paystack
+    // Verify the transaction directly with Paystack.
     const response = await fetch(
-      `https://api.paystack.co/transaction/verify/${encodeURIComponent(
-        reference,
-      )}`,
+      `https://api.paystack.co/transaction/verify/${encodeURIComponent(reference)}`,
       {
         method: "GET",
         headers: {
@@ -142,7 +208,7 @@ const verifyPayment = async (req, res) => {
 
     const data = await response.json();
 
-    if (!response.ok || !data.status) {
+    if (!response.ok || !data.status || !data.data) {
       return res.status(400).json({
         message: data.message || "Payment verification failed.",
       });
@@ -150,45 +216,77 @@ const verifyPayment = async (req, res) => {
 
     const payment = data.data;
 
-    // Payment must actually be successful
     if (payment.status !== "success") {
       return res.status(400).json({
         message: `Payment status is ${payment.status}.`,
       });
     }
 
-    // Payment must be in Nigerian Naira
     if (payment.currency !== "NGN") {
       return res.status(400).json({
         message: "Invalid payment currency.",
       });
     }
 
-    let totalAmount = 0;
-    const orderItems = [];
+    // Use the metadata recorded during initialization, not the
+    // customer and item details supplied again by the frontend.
+    const metadata = payment.metadata;
 
-    // Start MongoDB transaction
-    session.startTransaction();
+    if (
+      !metadata ||
+      metadata.userId !== req.user._id.toString() ||
+      !metadata.customer ||
+      !Array.isArray(metadata.items) ||
+      metadata.items.length === 0
+    ) {
+      return res.status(403).json({
+        message: "This payment is not associated with your account or order.",
+      });
+    }
 
-    // Check products and calculate the real order total
-    for (const item of items) {
-      const quantity = Number(item.quantity);
+    const customer = metadata.customer;
+    const paymentMethod = ["card", "paypal", "bank"].includes(
+      metadata.paymentMethod,
+    )
+      ? metadata.paymentMethod
+      : "card";
 
-      if (!Number.isInteger(quantity) || quantity < 1) {
-        await session.abortTransaction();
+    const quantities = new Map();
 
+    for (const item of metadata.items) {
+      if (
+        !mongoose.Types.ObjectId.isValid(item.productId) ||
+        !Number.isInteger(Number(item.quantity)) ||
+        Number(item.quantity) < 1
+      ) {
         return res.status(400).json({
-          message: "Invalid product quantity.",
+          message: "Invalid order information associated with this payment.",
         });
       }
 
-      const product = await Product.findById(item.productId).session(session);
+      const productId = item.productId.toString();
+
+      quantities.set(
+        productId,
+        (quantities.get(productId) || 0) + Number(item.quantity),
+      );
+    }
+
+    const orderItems = [];
+    let totalAmount = 0;
+
+    // Start a MongoDB transaction so stock changes and order creation
+    // succeed together or are rolled back together.
+    session.startTransaction();
+
+    for (const [productId, quantity] of quantities) {
+      const product = await Product.findById(productId).session(session);
 
       if (!product) {
         await session.abortTransaction();
 
         return res.status(404).json({
-          message: `Product not found: ${item.productId}`,
+          message: "One or more products could not be found.",
         });
       }
 
@@ -202,6 +300,14 @@ const verifyPayment = async (req, res) => {
 
       const price = Number(product.price);
 
+      if (!Number.isFinite(price) || price < 0) {
+        await session.abortTransaction();
+
+        return res.status(400).json({
+          message: `Invalid price for ${product.name}.`,
+        });
+      }
+
       orderItems.push({
         product: product._id,
         name: product.name,
@@ -213,7 +319,7 @@ const verifyPayment = async (req, res) => {
       totalAmount += price * quantity;
     }
 
-    // Paystack amount is stored in kobo
+    // Paystack reports the transaction amount in kobo.
     const expectedAmount = Math.round(totalAmount * 100);
 
     if (Number(payment.amount) !== expectedAmount) {
@@ -224,19 +330,15 @@ const verifyPayment = async (req, res) => {
       });
     }
 
-    // Reduce stock atomically
-    for (const item of items) {
+    // Reduce stock only when sufficient stock remains.
+    for (const [productId, quantity] of quantities) {
       const updatedProduct = await Product.findOneAndUpdate(
         {
-          _id: item.productId,
-          stock: {
-            $gte: Number(item.quantity),
-          },
+          _id: productId,
+          stock: { $gte: quantity },
         },
         {
-          $inc: {
-            stock: -Number(item.quantity),
-          },
+          $inc: { stock: -quantity },
         },
         {
           new: true,
@@ -254,48 +356,44 @@ const verifyPayment = async (req, res) => {
       }
     }
 
-    // Create order inside the same transaction
+    // Create the order and link it to the authenticated customer.
     const createdOrders = await Order.create(
       [
         {
-          user: req.user ? req.user._id : null,
+          user: req.user._id,
           customer,
           items: orderItems,
           totalAmount,
           paymentReference: reference,
           paymentStatus: "Paid",
-          paymentMethod: paymentMethod || "card",
+          paymentMethod,
           status: "Processing",
         },
       ],
-      {
-        session,
-      },
+      { session },
     );
 
     const order = createdOrders[0];
 
-    // Commit everything together
     await session.commitTransaction();
 
-    res.json({
+    return res.json({
       message: "Payment verified and order created successfully.",
       order,
       payment,
     });
   } catch (error) {
-    // Roll back everything if something fails
     if (session.inTransaction()) {
       await session.abortTransaction();
     }
 
     console.error("Verify payment error:", error);
 
-    res.status(500).json({
+    return res.status(500).json({
       message: "Failed to verify payment.",
     });
   } finally {
-    session.endSession();
+    await session.endSession();
   }
 };
 

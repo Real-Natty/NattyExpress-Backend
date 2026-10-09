@@ -60,7 +60,7 @@ const createOrder = async (req, res) => {
     }
 
     const order = await Order.create({
-      user: req.user ? req.user._id : null,
+      user: req.user._id,
       customer,
       items: orderItems,
       totalAmount,

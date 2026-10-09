@@ -11,12 +11,32 @@ const adminRoutes = require("./routes/adminRoutes");
 const orderRoutes = require("./routes/orderRoutes");
 const path = require("path");
 const paymentRoutes = require("./routes/paymentRoutes");
+const feedbackRoutes = require("./routes/feedbackRoutes");
 
 const app = express();
 
+// app.use(
+//   cors({
+//     origin: process.env.FRONTEND_URL || "http://localhost:5173",
+//     credentials: true,
+//   }),
+// );
+
+const allowedOrigins = [
+  "http://localhost:5173",
+  "http://127.0.0.1:5173",
+  "https://natty-express-frontend-951u.vercel.app",
+];
+
 app.use(
   cors({
-    origin: process.env.FRONTEND_URL || "http://localhost:5173",
+    origin: function (origin, callback) {
+      if (!origin || allowedOrigins.includes(origin)) {
+        callback(null, true);
+      } else {
+        callback(new Error("Not allowed by CORS: " + origin));
+      }
+    },
     credentials: true,
   }),
 );
@@ -31,7 +51,7 @@ app.use("/api/products", productRoutes);
 app.use("/api/admin", adminRoutes);
 app.use("/api/orders", orderRoutes);
 app.use("/api/payments", paymentRoutes);
-
+app.use("/api/feedback", feedbackRoutes);
 app.get("/api/auth/me", protect, (req, res) => {
   res.json({
     user: req.user,

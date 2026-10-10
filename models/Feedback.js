@@ -34,6 +34,27 @@ const feedbackSchema = new mongoose.Schema(
       type: Boolean,
       default: false,
     },
+
+    replies: [
+      {
+        message: {
+          type: String,
+          required: true,
+          trim: true,
+          maxlength: 3000,
+        },
+
+        sentAt: {
+          type: Date,
+          default: Date.now,
+        },
+
+        emailSent: {
+          type: Boolean,
+          default: false,
+        },
+      },
+    ],
   },
   {
     timestamps: true,

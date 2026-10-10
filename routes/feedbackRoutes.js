@@ -3,8 +3,10 @@ const mongoose = require("mongoose");
 const Feedback = require("../models/Feedback");
 const { protect } = require("../middleware/authMiddleware");
 const { admin } = require("../middleware/adminMiddleware");
+const { Resend } = require("resend");
 
 const router = express.Router();
+const resend = new Resend(process.env.RESEND_API_KEY);
 
 // Submit feedback
 router.post("/", async (req, res) => {
@@ -132,6 +134,85 @@ router.delete("/:id", protect, admin, async (req, res) => {
 
     res.status(500).json({
       message: "Failed to delete feedback.",
+    });
+  }
+});
+
+// Admin: Reply to customer feedback by email
+router.post("/:id/reply", protect, admin, async (req, res) => {
+  try {
+    const { message } = req.body;
+    const { id } = req.params;
+
+    if (!mongoose.isValidObjectId(id)) {
+      return res.status(400).json({
+        message: "Invalid feedback ID.",
+      });
+    }
+
+    if (typeof message !== "string" || !message.trim()) {
+      return res.status(400).json({
+        message: "Reply message is required.",
+      });
+    }
+
+    if (message.trim().length > 3000) {
+      return res.status(400).json({
+        message: "Reply cannot exceed 3000 characters.",
+      });
+    }
+
+    const feedback = await Feedback.findById(id);
+
+    if (!feedback) {
+      return res.status(404).json({
+        message: "Feedback message not found.",
+      });
+    }
+
+    if (!process.env.RESEND_API_KEY) {
+      return res.status(500).json({
+        message: "Email service is not configured.",
+      });
+    }
+
+    const replyMessage = message.trim();
+
+    const emailResult = await resend.emails.send({
+      from: "NattyExpress Support <onboarding@resend.dev>",
+      to: [feedback.email],
+      subject: `Reply to your NattyExpress ${feedback.category.toLowerCase()} feedback`,
+      text: `Hello ${feedback.name},\n\nThank you for contacting NattyExpress.\n\nOur response:\n\n${replyMessage}\n\nRegards,\nNattyExpress Support`,
+    });
+
+    if (emailResult.error) {
+      console.error("Resend email error:", emailResult.error);
+
+      return res.status(502).json({
+        message:
+          "Your reply could not be emailed. Check your Resend configuration and verified recipient.",
+      });
+    }
+
+    feedback.replies.push({
+      message: replyMessage,
+      sentAt: new Date(),
+      emailSent: true,
+    });
+
+    feedback.isRead = true;
+
+    await feedback.save();
+
+    res.json({
+      message: "Reply sent successfully to the customer's email.",
+      feedback,
+    });
+  } catch (error) {
+    console.error("Feedback reply error:", error);
+
+    res.status(500).json({
+      message: "Failed to send feedback reply.",
     });
   }
 });
